@@ -373,7 +373,7 @@ scripts/install.sh         installer (--dry-run, --uninstall)
 systemd/                   oneshot service + daily timer
 config/config.ini.example  annotated configuration
 docs/                      setup walkthrough + design rationale
-tests/                     39 tests, incl. format equivalence vs PyMISP
+tests/                     51 tests, incl. format equivalence vs PyMISP
 ```
 
 Generated at runtime:
@@ -422,9 +422,12 @@ of 200k-attribute events that's re-parsing well over a gigabyte of JSON
 nightly. This reads small per-day sidecars instead and produces identical
 output — again, with a test asserting it.
 
-**Rolling by pruning.** A domain ages out when its day's event drops out of the
-manifest. Pruning only touches files whose names match a UUID this tool would
-have generated, so anything else in the directory is left alone.
+**Rolling by pruning — on disk and in the cache, not in fetched events.** A day's
+event leaves the manifest once it falls outside the window, and pruning only
+touches files whose names match a UUID this tool would have generated. The Redis
+cache follows, because it is rebuilt from `hashes.csv`. Events already fetched
+into MISP do not — see
+[Retention](#retention-read-this-before-choosing-a-window).
 
 **Always yesterday, never today.** WhoisFreaks publishes ccTLD data for the
 previous day around 03:00 UTC and gTLD not reliably until the afternoon, so
