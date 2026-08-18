@@ -1,6 +1,11 @@
-#!/usr/bin/env python3
 """
 wf-misp-nrd-feed -- publish the WhoisFreaks NRD feed as a MISP feed.
+
+Deliberately no shebang: this module is never executed directly. It is invoked
+as `python -m src.main` (by the launcher install.sh writes) or through the
+`misp-nrd-feed` console_scripts entry point. A shebang here would only be
+decorative, and it fails ruff's EXE001 whenever the executable bit does not
+survive a clone or a file transfer -- which is most of the time.
 
 Normal daily run (fetches yesterday only, everything else is cached):
 
