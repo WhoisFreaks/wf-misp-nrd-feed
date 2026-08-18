@@ -1,0 +1,73 @@
+; wf-misp-nrd-feed configuration
+; Install to /etc/misp-nrd-feed/config.ini  (chmod 600 -- it holds an API key)
+
+[whoisfreaks]
+; Get a key at https://billing.whoisfreaks.com/signup
+; Prefer the NRD_API_KEY environment variable in production so the key never
+; sits in a file that might get committed or swept into a backup.
+api_key =
+
+; File download service. Override only if your subscription tier differs --
+; check the API Reference page in your dashboard.
+base_url = https://files.whoisfreaks.com/v3.1/download/domainer
+
+; Which TLD sets to pull. gtld is roughly 4x the volume of cctld.
+; Start with gtld alone if you want to keep the attribute count down.
+feeds = gtld, cctld
+
+[retention]
+; Rolling window in days. This is the single biggest lever on how much data
+; lands in MISP: on the order of 200k domains/day for gtld+cctld.
+;   7  -> ~1.4M attributes   (recommended starting point)
+;   14 -> ~2.8M attributes
+;   30 -> ~6M attributes     (size your MySQL before trying this)
+days = 7
+
+[paths]
+cache_dir  = /var/cache/misp-nrd-feed
+output_dir = /var/lib/misp-nrd-feed/feed
+; meta_dir defaults to <cache_dir>/feedmeta.
+; It must NOT live inside output_dir -- MISP parses every *.json it finds there.
+; meta_dir = /var/cache/misp-nrd-feed/feedmeta
+
+[misp]
+org_name = WhoisFreaks
+
+; Seeds every event and attribute UUID. Generate ONE with `uuidgen` when you
+; first deploy and then never change it -- changing it makes every existing
+; event a different event to MISP, duplicating the entire window.
+uuid_namespace = b0f1e2c3-4d5a-4b6c-8d7e-9f0a1b2c3d4e
+
+event_info_prefix = WhoisFreaks NRD
+
+; 4 = Undefined. Being newly registered is not, by itself, a verdict.
+threat_level_id = 4
+; 2 = Completed
+analysis = 2
+published = true
+
+; --- the two settings that decide whether your MISP stays fast -------------
+; to_ids=false: these are context, not detection indicators. Setting this true
+; exports ~200k domains/day into every IDS ruleset MISP generates.
+to_ids = false
+
+; disable_correlation=true: read docs/why-disable-correlation.md before
+; changing this. At NRD volume, correlation is where instances fall over.
+disable_correlation = true
+; --------------------------------------------------------------------------
+
+category = Network activity
+
+; Mode for files written into the feed directory. MISP reads them as its own
+; web user (www-data / apache / uid 33 in a container), so they must be
+; readable by others. Deliberately NOT derived from umask: a host with umask
+; 077 would otherwise produce 0600 and a feed MISP cannot read, with no error.
+; 0640 is viable only if MISP's user shares the misp-nrd group.
+file_mode = 0644
+
+; Semicolon-separated. tlp:clear is a standard MISP taxonomy tag; the
+; whoisfreaks: namespace is a plain free-text tag and needs nothing installed.
+tags = tlp:clear; whoisfreaks:feed="nrd"
+
+[logging]
+level = INFO

@@ -1,0 +1,33 @@
+[Unit]
+Description=Publish WhoisFreaks NRD data as a MISP feed
+Documentation=https://github.com/WhoisFreaks/wf-misp-nrd-feed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=misp-nrd
+Group=misp-nrd
+ExecStart=/usr/local/bin/misp-nrd-feed
+# Feed files must stay world-readable so MISP's web user can pull them.
+UMask=0022
+
+# Measured: a 7-day gtld+cctld backfill (2.6M domains) peaks around 220 MB RSS.
+# Peak is roughly independent of window width, because manifest and hashes.csv
+# assembly streams rather than buffering the whole feed -- only the per-day event
+# build scales, and that is bounded by one day's domain count. 1G leaves ~4x
+# headroom; raise it only if a single day's volume grows dramatically.
+MemoryMax=1G
+TimeoutStartSec=3600
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/cache/misp-nrd-feed /var/lib/misp-nrd-feed
+
+[Install]
+WantedBy=multi-user.target

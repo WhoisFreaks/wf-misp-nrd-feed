@@ -1,0 +1,16 @@
+.env
+config/config.ini
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+# generated feed output, if anyone points it at the checkout
+feed/
+output/
+*.tmp
+.idea/

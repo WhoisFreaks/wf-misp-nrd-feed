@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily WhoisFreaks NRD -> MISP feed refresh
+Documentation=https://github.com/WhoisFreaks/wf-misp-nrd-feed
+
+[Timer]
+# 20:30 UTC. The run always targets *yesterday*, so the exact hour is not
+# critical, but late in the UTC day means gTLD data for the previous day is
+# reliably published by the time we ask for it.
+OnCalendar=*-*-* 20:30:00 UTC
+# Spread load if several hosts share a schedule, and catch up after downtime.
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target
