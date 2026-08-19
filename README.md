@@ -40,11 +40,20 @@ one you decide to investigate.
 
 ## Why freshness belongs in MISP at all
 
-Most phishing and malware C2 infrastructure is registered and weaponised
-within 24–48 hours of first use. By the time a domain shows up in a
-reputation feed, the campaign has usually already run. Domain age is the one
-signal that is available *before* anyone has classified the domain, because it
-comes from the registry rather than from observed badness.
+Phishing and malware C2 infrastructure is frequently weaponized within hours of
+registration. Research published in the
+[Journal of Cybersecurity](https://academic.oup.com/cybersecurity/article/12/1/tyag020/8735840)
+(Agarwal and Vasek, 2026) found that criminals deploy phishing sites on domains
+"as soon as they are registered," and
+[Unit 42](https://unit42.paloaltonetworks.com/newly-registered-domains-malicious-abuse-by-bad-actors/)
+has documented malware using a domain for C2 on its registration day, noting that
+malicious new domains are often alive only a few hours before any vendor detects
+them.
+
+By the time a domain shows up in a reputation feed, the campaign has usually
+already run. Domain age is the one signal that is available *before* anyone has
+classified the domain, because it comes from the registry rather than from
+observed badness.
 
 In MISP that lands as context, not as a verdict. A domain being three days old
 isn't evidence of anything on its own — but "this domain in the alert you're
@@ -93,7 +102,7 @@ settings database. On such an instance, serving over HTTP is the only option.
 | `useradd` | required | present everywhere except Alpine (`apk add shadow`) |
 | Root | for `install.sh` only | the tool itself runs as the unprivileged `misp-nrd` user |
 | Egress | HTTPS to `files.whoisfreaks.com` | open it, or set `HTTPS_PROXY` in the service unit |
-| Disk | ~15 MB per 100k domains per day | 7-day gTLD+ccTLD ≈ 1 GB, 30-day ≈ 4 GB, cache included |
+| Disk | ~700 MB per million domains in the window | 7-day gTLD+ccTLD ≈ 1 GB, 30-day ≈ 4 GB, gzip cache included |
 | API key | [WhoisFreaks account](https://billing.whoisfreaks.com/signup) with the **NRD (Domainer)** product | WHOIS-only plans return HTTP 403 |
 
 `install.sh` checks all of the above before touching anything, and refuses
@@ -151,7 +160,7 @@ You'll also need, on the MISP side:
 > **Starting from nothing?** Follow
 > [`docs/SETUP-LINUX.md`](docs/SETUP-LINUX.md) instead. It covers Debian/Ubuntu,
 > RHEL-family, Arch, openSUSE and Alpine — including installing MISP via Docker,
-> the container volume mount a Local feed needs, and the SELinux labelling
+> the container volume mount a Local feed needs, and the SELinux labeling
 > RHEL-family distros require. This section assumes a working MISP already.
 
 ```bash
@@ -293,7 +302,7 @@ from `manifest.json` on demand and each event's `info` field carries its date.
 
 So you get the freshness signal, the exact registration date, a window that
 genuinely rolls, ingest in seconds, no database growth, and no possibility of the
-correlation problem this project spends so much effort neutralising — because no
+correlation problem this project spends so much effort neutralizing — because no
 attribute is ever created.
 
 What you give up is attributes as first-class objects: you cannot search, filter,
@@ -303,12 +312,22 @@ search covers your case before assuming cache-only is sufficient.
 
 **2. Fetch, and purge deliberately.** Only worth it if you need attributes as
 real objects — searchable, taggable, pivotable. You do *not* need it merely for
-the registration date, which caching already gives you. Delete aged-out events
-yourself:
-The event UUIDs are deterministic — `uuid5(namespace, "wf-nrd-event|<date>")` —
-so the events to remove are computable without querying anything. This needs a
-MISP API key and a scheduled purge; this tool deliberately does not talk to the
-MISP API.
+the registration date, which caching already gives you.
+
+If you go this route you must delete aged-out events yourself. The event UUIDs
+are deterministic — `uuid5(namespace, "wf-nrd-event|<date>")` — so the events to
+remove are computable without querying anything:
+
+```python
+import uuid
+NS = uuid.UUID("your-uuid_namespace-from-config.ini")
+stale = uuid.uuid5(NS, "wf-nrd-event|2026-07-01")   # -> the event UUID to delete
+```
+
+Pass that UUID to MISP's event deletion endpoint on a schedule, or to PyMISP's
+`delete_event()`. Check the API reference on your own instance for the exact
+route, since it has changed between MISP versions. This needs a MISP API key;
+this tool deliberately does not talk to the MISP API.
 
 **3. Fetch with a deliberately small window and accept the growth.** Viable for
 evaluation, not for a long-lived instance.
@@ -331,7 +350,7 @@ they are the amount arriving, not the steady-state total — see
 | 3 | ~600k | Small enough to consider enabling correlation |
 | **7** | **~1.4M** | **Default. Good balance for most instances.** |
 | 14 | ~2.8M | Comfortable on a well-resourced instance |
-| 30 | ~6M | Unit 42's recommended detection window. Size MySQL first. |
+| 30 | ~6M | Close to [Unit 42's 32-day detection window](https://unit42.paloaltonetworks.com/newly-registered-domains-malicious-abuse-by-bad-actors/). Size MySQL first. |
 
 Anything over 90 is refused outright — raise the guard in `src/config.py` if
 you truly mean it.
@@ -451,9 +470,25 @@ wc -l /var/lib/misp-nrd-feed/feed/hashes.csv
 journalctl -u misp-nrd-feed.service --since today --no-pager
 ```
 
-In MISP, after a fetch: *Sync Actions → List Feeds* shows a non-zero event
-count against the feed. Search any domain from the window under
-*Event Actions → Search* and it should resolve to the right day's event.
+In MISP, what you check depends on which mode you chose.
+
+**Cache-only (the recommended default).** *Sync Actions → List Feeds* shows the
+`Cached` column reading a timestamp rather than *Not Cached*. Then
+*Sync Actions → List Feeds → Search Feed Caches* in the side menu: a domain from
+the window resolves, and the hit reports the matching event's date.
+
+**Zero events is the expected result in this mode**, and so is a domain not being
+found under *Event Actions → Search*. Neither is a failure. If you go looking for
+events after choosing cache-only, correct behavior looks identical to a broken
+feed.
+
+**Fetch.** *Sync Actions → List Feeds* shows a non-zero event count against the
+feed. Search any domain from the window under *Event Actions → Search* and it
+should resolve to the right day's event.
+
+The two checks fail independently, so if you run both modes, run both checks. See
+[Part 8 of the setup guide](docs/SETUP-LINUX.md#part-8--verify) for the longer
+version.
 
 ---
 

@@ -1,5 +1,9 @@
 ; wf-misp-nrd-feed configuration
-; Install to /etc/misp-nrd-feed/config.ini  (chmod 600 -- it holds an API key)
+; Install to /etc/misp-nrd-feed/config.ini
+; Mode 640, owner root:misp-nrd. It holds an API key, so it must not be world
+; readable -- but do NOT use 600. That grants the owner (root) only and locks out
+; the misp-nrd service user that actually reads this file, which surfaces later as
+; a confusing "No API key" error. install.sh sets 640 and repairs 600 if it finds it.
 
 [whoisfreaks]
 ; Get a key at https://billing.whoisfreaks.com/signup
@@ -33,10 +37,14 @@ output_dir = /var/lib/misp-nrd-feed/feed
 [misp]
 org_name = WhoisFreaks
 
+; REPLACE THIS VALUE BEFORE YOUR FIRST RUN.
 ; Seeds every event and attribute UUID. Generate ONE with `uuidgen` when you
 ; first deploy and then never change it -- changing it makes every existing
 ; event a different event to MISP, duplicating the entire window.
-uuid_namespace = b0f1e2c3-4d5a-4b6c-8d7e-9f0a1b2c3d4e
+; The value below is a shared placeholder, not a default. Leaving it in place
+; means your event UUIDs are identical to every other deployment that also left
+; it in place, which collides the moment two such instances sync events.
+uuid_namespace = CHANGE-ME-RUN-uuidgen
 
 event_info_prefix = WhoisFreaks NRD
 

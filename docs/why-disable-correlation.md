@@ -5,6 +5,19 @@ high-volume feed, and for newly registered domains the correlations you'd get
 are almost all noise. If you turn it on, do it deliberately and with a smaller
 window.
 
+> **Scope: this document is about fetch mode.**
+>
+> Correlation only happens to attributes, and attributes only exist if you run a
+> fetch. In cache-only mode, the recommended default, no events and no attributes
+> are created, so nothing enters the correlation engine and `disable_correlation`
+> has nothing to act on. The flag is still written into the feed JSON, because the
+> feed has to be safe for anyone who does fetch it.
+>
+> If you are running cache-only, you can skip this document. Read it before you
+> enable fetch, or before you flip either flag. See
+> [Retention in the README](../README.md#retention-read-this-before-choosing-a-window)
+> for how to choose between the two modes.
+
 ## The arithmetic
 
 WhoisFreaks publishes on the order of 200,000 new domains a day across gTLD
@@ -57,18 +70,26 @@ job it's here for:
 - **Feed lookups / caching.** With *Caching enabled* ticked on the feed in
   MISP, an analyst looking at any domain attribute sees whether it appears in
   this feed, and in which day's event. That is the "how old is this domain"
-  answer, delivered at the point of triage.
-- **Search and API.** The attributes are real attributes. `/attributes/restSearch`
-  finds them, so your SOAR playbooks and enrichment scripts can ask "is this
-  domain in the NRD window" without a separate API call to WhoisFreaks.
+  answer, delivered at the point of triage. This works in both modes, because it
+  is driven by the Redis cache rather than by attributes.
 - **The freshness signal.** Each domain sits in the event for the day it was
   registered, so the event date *is* the registration date. Age is a
-  subtraction, not a lookup.
+  subtraction, not a lookup. This also survives in cache-only mode, because MISP
+  resolves the event's date from `manifest.json` on demand.
+- **Search and API, in fetch mode only.** If you fetch, the attributes are real
+  attributes and `/attributes/restSearch` finds them, so SOAR playbooks and
+  enrichment scripts can ask "is this domain in the NRD window" without a separate
+  API call to WhoisFreaks. **This does not apply in cache-only mode**, where no
+  attributes exist to search, filter, tag or pivot on. If a playbook depends on
+  `restSearch`, you need fetch mode, and you need to plan the purge described in
+  [Retention](../README.md#retention-read-this-before-choosing-a-window).
 
 ## When to turn it on
 
-There is a legitimate case for correlation: a small window, treated as a
-detection feed rather than a reference set.
+There is a legitimate case for correlation: a small window, fetched rather than
+only cached, and treated as a detection feed rather than a reference set. This
+only makes sense in fetch mode; if you are not fetching, there is nothing to
+correlate and nothing to change.
 
 ```ini
 [retention]

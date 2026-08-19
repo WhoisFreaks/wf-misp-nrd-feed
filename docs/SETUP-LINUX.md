@@ -315,10 +315,10 @@ defaults apply:
 |---|---|---|
 | `ADMIN_EMAIL` | `admin@admin.test` | username for user #1 |
 | `ADMIN_PASSWORD` | `admin` | password for user #1 |
-| `ADMIN_ORG` | | organisation name for user #1 |
+| `ADMIN_ORG` | | organization name for user #1 |
 | `ADMIN_KEY` | auto-generated | API key, if you want to script the feed setup |
 
-They only initialise user #1 **on first boot**. Editing them against an
+They only initialize user #1 **on first boot**. Editing them against an
 existing database changes nothing, so if you've already started MISP, log in
 with the defaults and change the password in the UI.
 
@@ -440,7 +440,7 @@ need: **adding a feed requires the site admin role**; an org admin can't.
 **Tick "Disable correlation".** It disables correlations for every event coming
 from this feed, and it is the feed-level enforcement of the whole design. The
 generated attributes already carry `disable_correlation: true`, but that depends
-on MISP honouring the per-attribute flag through ingest; this tick guarantees it
+on MISP honoring the per-attribute flag through ingest; this tick guarantees it
 at the ingest layer. With 600k+ attributes, belt and braces is the right call —
 this setting can also override what the feed data says, so leaving it off is the
 one mistake that can undo the design.
