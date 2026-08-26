@@ -77,5 +77,42 @@ file_mode = 0644
 ; whoisfreaks: namespace is a plain free-text tag and needs nothing installed.
 tags = tlp:clear; whoisfreaks:feed="nrd"
 
+; ---------------------------------------------------------------------------
+; Domain Threat Feeds (phishing / malware / spam) -- a SEPARATE WhoisFreaks
+; product, off by default.
+;
+; These carry the opposite semantics to the NRD feed: NRD says "this domain is
+; new" (context), threat feeds say "this domain was observed being malicious"
+; (a verdict). So to_ids and disable_correlation are inverted, and because
+; 'Disable correlation' is a per-feed setting in MISP, this MUST be registered
+; as a second MISP feed with its own directory.
+;
+; Read docs/THREAT-FEEDS.md before enabling.
+; ---------------------------------------------------------------------------
+[threat]
+enabled = false
+
+; A different API version and path segment from the NRD download service
+; (/v3.1/download/domainer). Override only if your tier differs.
+base_url = https://files.whoisfreaks.com/v3.4/download/threat-feed
+
+types = phishing, malware, spam
+
+; Defaults to a sibling of output_dir above. Must not equal it.
+; output_dir = /var/lib/misp-nrd-feed/threat-feed
+
+; Drop rows below this confidence score (0-1). 0 keeps everything.
+min_confidence = 0.0
+
+; Inverted relative to the NRD settings, deliberately:
+;   to_ids true              -> these belong in IDS rulesets; NRD domains do not
+;   disable_correlation false -> a match here is signal, not noise
+to_ids = true
+disable_correlation = false
+
+; A flagged domain does not stop being flagged, so there is no window to roll.
+; 0 keeps every day.
+retention_days = 0
+
 [logging]
 level = INFO

@@ -672,6 +672,47 @@ grep misp-nrd /var/log/messages                                # cron/syslog
 
 ---
 
+## Part 8b — Optional: the Domain Threat Feeds
+
+Everything so far publishes newly registered domains, which is *context*. If you
+also want domains that have been observed hosting phishing pages, distributing
+malware or sending spam — a *verdict* — WhoisFreaks publishes those separately
+and this tool can build them as a second MISP feed.
+
+```bash
+sudo -u misp-nrd misp-nrd-feed --threat
+```
+
+Two things make it a genuinely separate feed rather than more of the same:
+
+- Its attributes carry `to_ids: true` and correlation **enabled**, the inverse of
+  the NRD settings. A verdict belongs in your IDS rulesets and its correlations
+  are signal, not noise.
+- Because *Disable correlation* is a per-feed setting in MISP, the two cannot
+  share a feed or a directory. You register a second feed pointed at
+  `/var/lib/misp-nrd-feed/threat-feed`, with *Disable correlation* **unticked**.
+
+In Docker that means a second mount:
+
+```yaml
+services:
+  misp-core:
+    volumes:
+      - "/var/lib/misp-nrd-feed/feed:/nrd-feed:ro"
+      - "/var/lib/misp-nrd-feed/threat-feed:/nrd-threat-feed:ro"
+```
+
+Append `,z` to both on RHEL-family hosts, as in Part 6.
+
+Unlike the NRD feed, **fetch** is usually the right mode here: the volume is
+manageable and you want the attributes as real objects to search, tag and pivot
+on.
+
+Full walkthrough, including the confidence threshold and the full-dump-then-delta
+delivery model: [`THREAT-FEEDS.md`](THREAT-FEEDS.md).
+
+---
+
 ## Part 9 — Schedule it
 
 Only after a successful ingest.

@@ -19,6 +19,33 @@ schedule, with its own error handling.
 
 ---
 
+## Not every new domain is a threat
+
+Most newly registered domains are entirely legitimate — launches, blogs,
+campaign microsites, rebrands. That is precisely why this feed treats age as
+*context* rather than a verdict, and why its attributes ship with
+`to_ids: false`.
+
+Some of them are malicious, though, and WhoisFreaks publishes that separately as
+the [Domain Threat Feeds](https://whoisfreaks.com/products/threat-intelligence-feed):
+curated phishing, malware and spam domain lists built from confirmed seeds
+expanded across shared infrastructure. This tool can publish those to MISP too,
+as a second feed:
+
+```bash
+sudo -u misp-nrd misp-nrd-feed --threat
+```
+
+Their MISP settings are the **inverse** of the NRD feed's — `to_ids: true` and
+correlation *enabled*, because a verdict deserves different handling from
+context. See [`docs/THREAT-FEEDS.md`](docs/THREAT-FEEDS.md).
+
+Run both and an analyst sees two independent signals at once: this domain is
+four days old, *and* it is in the phishing feed. Either alone is weaker than the
+pair.
+
+---
+
 ## How this differs from the WhoisFreaks MISP module
 
 Both exist; they answer different questions.
@@ -369,6 +396,9 @@ misp-nrd-feed --dry-run          # no network, no writes, just report
 misp-nrd-feed --force            # rewrite event files even if unchanged
 misp-nrd-feed --days 14          # override the window for one run (cache kept)
 misp-nrd-feed --feeds gtld       # gTLD only for one run
+misp-nrd-feed --threat           # also build the phishing/malware/spam feed
+misp-nrd-feed --threat-only      # only the threat feed, skip NRD
+misp-nrd-feed --threat-types phishing,malware
 ```
 
 A `--days` override applies to the generated feed only; it deliberately does not
@@ -386,13 +416,14 @@ problem, `130` interrupted.
 src/config.py              ini + env config, with guard rails
 src/cache_manager.py       per-day gzip cache: save/load/expire/merge
 src/nrd_fetcher.py         WhoisFreaks NRD download + tolerant parsing
+src/threat_fetcher.py      phishing/malware/spam feeds (CSV, full dump + deltas)
 src/feed_builder.py        MISP feed format: events, manifest, hashes, pruning
 src/main.py                CLI orchestration
 scripts/install.sh         installer (--dry-run, --uninstall)
 systemd/                   oneshot service + daily timer
 config/config.ini.example  annotated configuration
-docs/                      setup walkthrough + design rationale
-tests/                     51 tests, incl. format equivalence vs PyMISP
+docs/                      setup walkthrough, threat feeds, design rationale
+tests/                     66 tests, incl. format equivalence vs PyMISP
 ```
 
 Generated at runtime:
@@ -401,6 +432,7 @@ Generated at runtime:
 /var/cache/misp-nrd-feed/               nrd-YYYY-MM-DD-{gtld,cctld}.txt.gz
 /var/cache/misp-nrd-feed/feedmeta/      per-day manifest + hash sidecars
 /var/lib/misp-nrd-feed/feed/            manifest.json, <uuid>.json, hashes.csv
+/var/lib/misp-nrd-feed/threat-feed/     the same, for the threat feeds (separate MISP feed)
 ```
 
 `feedmeta` must stay **outside** the feed directory: MISP parses every `*.json`
@@ -576,6 +608,11 @@ Same NRD feed, different surfaces:
 - [wf-spamassassin-nrd-feed](https://github.com/WhoisFreaks/wf-spamassassin-nrd-feed) — email scoring
 - [wf-suricata-nrd-feed](https://github.com/WhoisFreaks/wf-suricata-nrd-feed) — IDS alerting
 - [wf-zeek-nrd-feed](https://github.com/WhoisFreaks/wf-zeek-nrd-feed) — passive network analysis
+
+And the companion dataset, which this tool also publishes:
+[Domain Threat Feeds](https://whoisfreaks.com/products/threat-intelligence-feed)
+— curated phishing, malware and spam domains
+([docs](https://whoisfreaks.com/documentation/threat-intelligence-feed)).
 
 ## License
 

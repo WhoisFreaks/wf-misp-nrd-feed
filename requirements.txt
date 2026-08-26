@@ -1,5 +1,11 @@
 requests>=2.28.0
 
+# tldextract is OPTIONAL. Installed, it uses the full Public Suffix List to
+# decide whether a threat-feed row is an apex domain or a subdomain, which
+# selects the MISP attribute type (domain vs hostname). Without it, a bundled
+# subset of multi-label suffixes is used, which is accurate for common TLDs.
+#   pip install tldextract
+
 # PyMISP is NOT required at runtime -- this tool writes the feed format
 # directly and never calls the MISP API. It is only needed to run the
 # format-equivalence tests in tests/.

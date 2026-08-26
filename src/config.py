@@ -39,9 +39,24 @@ from pathlib import Path
 # --------------------------------------------------------------------------
 DEFAULT_BASE_URL = "https://files.whoisfreaks.com/v3.1/download/domainer"
 
+# --------------------------------------------------------------------------
+# WhoisFreaks Domain Threat Feeds endpoint (phishing / malware / spam)
+#
+#     GET <base>/{phishing|malware|spam}?apiKey=<KEY>[&date=YYYY-MM-DD]
+#
+# Omitting `date` returns a full dump; passing it returns that day's new and
+# changed rows. CSV only.
+#
+# Note this is a different API version and a different path segment from the
+# NRD download service (/v3.1/download/domainer). Override with
+# THREAT_BASE_URL if your subscription tier differs.
+# --------------------------------------------------------------------------
+DEFAULT_THREAT_BASE_URL = "https://files.whoisfreaks.com/v3.4/download/threat-feed"
+
 DEFAULT_CONFIG_PATH = "/etc/misp-nrd-feed/config.ini"
 
 VALID_FEEDS = ("gtld", "cctld")
+VALID_THREATS = ("phishing", "malware", "spam")
 
 
 class ConfigError(Exception):
@@ -105,6 +120,36 @@ class Config:
     )
 
     # --- behaviour ---------------------------------------------------------
+    # --- threat feeds ------------------------------------------------------
+    # Off by default: this is a separate WhoisFreaks product, and the MISP-side
+    # settings are the inverse of the NRD feed's, so it must be registered as a
+    # SECOND MISP feed with its own directory. See docs/THREAT-FEEDS.md.
+    threat_enabled: bool = False
+    threat_base_url: str = DEFAULT_THREAT_BASE_URL
+    threat_types: list[str] = field(
+        default_factory=lambda: ["phishing", "malware", "spam"]
+    )
+    threat_output_dir: str = ""       # derived from output_dir when empty
+    # True once an ini file or environment variable sets threat_output_dir
+    # explicitly, so a later --output-dir override does not silently move it.
+    threat_dir_explicit: bool = False
+    threat_min_confidence: float = 0.0
+
+    # Threat data is a verdict, not context -- so these are deliberately the
+    # opposite of the NRD defaults above.
+    threat_to_ids: bool = True
+    threat_disable_correlation: bool = False
+    # MISP threat levels: 1 High, 2 Medium, 3 Low, 4 Undefined.
+    threat_levels: dict = field(
+        default_factory=lambda: {"phishing": 2, "malware": 1, "spam": 3}
+    )
+    threat_tags: list[str] = field(
+        default_factory=lambda: ["tlp:clear", 'whoisfreaks:feed="threat"']
+    )
+    # 0 keeps every day. A flagged domain does not stop being flagged, so
+    # unlike the NRD window there is no reason to age these out by default.
+    threat_retention_days: int = 0
+
     log_level: str = "INFO"
     request_timeout: int = 120
     max_retries: int = 3
@@ -114,6 +159,19 @@ class Config:
     def __post_init__(self) -> None:
         if not self.meta_dir:
             self.meta_dir = str(Path(self.cache_dir) / "feedmeta")
+        self.derive_threat_dir()
+
+    def derive_threat_dir(self) -> None:
+        """
+        Place the threat feed directory beside the NRD one.
+
+        Never inside it: MISP parses every *.json next to a manifest, and these
+        are two distinct feeds with opposite correlation settings. Called again
+        after CLI overrides, since --output-dir moves what this is relative to.
+        """
+        if self.threat_dir_explicit and self.threat_output_dir:
+            return
+        self.threat_output_dir = str(Path(self.output_dir).parent / "threat-feed")
 
     def validate(self) -> None:
         if not self.api_key:
@@ -141,10 +199,33 @@ class Config:
                 f"file_mode={self.file_mode:04o} is out of range; expected an "
                 "octal mode between 0400 and 0777."
             )
+        if self.threat_enabled:
+            bad_t = [t for t in self.threat_types if t not in VALID_THREATS]
+            if bad_t:
+                raise ConfigError(
+                    f"Unknown threat feed(s) {bad_t!r}; valid values are "
+                    f"{list(VALID_THREATS)}."
+                )
+            if not self.threat_types:
+                raise ConfigError(
+                    "threat_enabled is true but threat_types is empty."
+                )
+            if not 0.0 <= self.threat_min_confidence <= 1.0:
+                raise ConfigError(
+                    f"threat_min_confidence must be between 0 and 1, got "
+                    f"{self.threat_min_confidence}."
+                )
+            if Path(self.threat_output_dir) == Path(self.output_dir):
+                raise ConfigError(
+                    "threat_output_dir must differ from output_dir. The two are "
+                    "registered in MISP as separate feeds with opposite "
+                    "'Disable correlation' settings, so they cannot share a "
+                    "directory."
+                )
         if self.category not in (
-            "Network activity",
-            "External analysis",
-            "Other",
+                "Network activity",
+                "External analysis",
+                "Other",
         ):
             raise ConfigError(
                 f"category={self.category!r} is not a MISP category that accepts "
@@ -259,6 +340,25 @@ def load(config_path: str | None = None) -> Config:
             if "tags" in s:
                 cfg.tags = [t.strip() for t in s["tags"].split(";") if t.strip()]
 
+        if parser.has_section("threat"):
+            s = parser["threat"]
+            cfg.threat_enabled = s.getboolean("enabled", cfg.threat_enabled)
+            cfg.threat_base_url = s.get("base_url", cfg.threat_base_url).rstrip("/")
+            if "types" in s:
+                cfg.threat_types = _split_list(s["types"])
+            if s.get("output_dir", ""):
+                cfg.threat_output_dir = s["output_dir"]
+                cfg.threat_dir_explicit = True
+            cfg.threat_min_confidence = s.getfloat(
+                "min_confidence", cfg.threat_min_confidence)
+            cfg.threat_to_ids = s.getboolean("to_ids", cfg.threat_to_ids)
+            cfg.threat_disable_correlation = s.getboolean(
+                "disable_correlation", cfg.threat_disable_correlation)
+            cfg.threat_retention_days = s.getint(
+                "retention_days", cfg.threat_retention_days)
+            if "tags" in s:
+                cfg.threat_tags = [t.strip() for t in s["tags"].split(";") if t.strip()]
+
         if parser.has_section("logging"):
             cfg.log_level = parser["logging"].get("level", cfg.log_level).upper()
 
@@ -284,10 +384,25 @@ def load(config_path: str | None = None) -> Config:
         cfg.file_mode = int(env["MISP_FILE_MODE"], 8)
     if "MISP_TAGS" in env:
         cfg.tags = [t.strip() for t in env["MISP_TAGS"].split(";") if t.strip()]
+    if "THREAT_ENABLED" in env:
+        cfg.threat_enabled = _as_bool(env["THREAT_ENABLED"])
+    cfg.threat_base_url = env.get("THREAT_BASE_URL", cfg.threat_base_url).rstrip("/")
+    if "THREAT_TYPES" in env:
+        cfg.threat_types = _split_list(env["THREAT_TYPES"])
+    if "THREAT_FEED_DIR" in env:
+        cfg.threat_output_dir = env["THREAT_FEED_DIR"]
+        cfg.threat_dir_explicit = True
+    if "THREAT_MIN_CONFIDENCE" in env:
+        cfg.threat_min_confidence = float(env["THREAT_MIN_CONFIDENCE"])
+    if "THREAT_TO_IDS" in env:
+        cfg.threat_to_ids = _as_bool(env["THREAT_TO_IDS"])
+    if "THREAT_DISABLE_CORRELATION" in env:
+        cfg.threat_disable_correlation = _as_bool(env["THREAT_DISABLE_CORRELATION"])
     cfg.log_level = env.get("NRD_LOG_LEVEL", cfg.log_level).upper()
 
     # meta_dir defaults relative to whatever cache_dir ended up as
     if not cfg.meta_dir:
         cfg.meta_dir = str(Path(cfg.cache_dir) / "feedmeta")
+    cfg.derive_threat_dir()
 
     return cfg

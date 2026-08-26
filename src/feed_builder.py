@@ -100,6 +100,19 @@ def attribute_uuid(feed_date: date, domain: str, namespace: str) -> str:
     return str(uuid.uuid5(_ns(namespace), f"wf-nrd-attr|{feed_date.isoformat()}|{domain}"))
 
 
+def threat_event_uuid(threat_type: str, feed_date: date, namespace: str) -> str:
+    return str(uuid.uuid5(
+        _ns(namespace), f"wf-threat-event|{threat_type}|{feed_date.isoformat()}"))
+
+
+def threat_attribute_uuid(threat_type: str, domain: str, namespace: str) -> str:
+    # Deliberately NOT date-scoped, unlike the NRD equivalent. A flagged domain
+    # is one indicator no matter which daily delta first carried it, so the same
+    # UUID lets MISP update the existing attribute instead of creating a second
+    # one when the domain reappears in a later delta.
+    return str(uuid.uuid5(_ns(namespace), f"wf-threat-attr|{threat_type}|{domain}"))
+
+
 def org_uuid(org_name: str, namespace: str) -> str:
     return str(uuid.uuid5(_ns(namespace), f"wf-nrd-org|{org_name}"))
 
@@ -239,6 +252,176 @@ def build_event(
             "Attribute": attributes,
         }
     }
+
+
+def build_threat_event(
+        threat_type: str,
+        feed_date: date,
+        records: list[Any],
+        *,
+        namespace: str,
+        org_name: str,
+        info_prefix: str = "WhoisFreaks Threat Feed",
+        threat_level_id: int = 2,
+        analysis: int = 2,
+        published: bool = True,
+        to_ids: bool = True,
+        disable_correlation: bool = False,
+        category: str = "Network activity",
+        tags: list[str] | None = None,
+        timestamp: int | None = None,
+) -> dict[str, Any]:
+    """
+    Build one event for a threat feed day.
+
+    The attribute flags here are the inverse of build_event()'s, and that is the
+    whole point. NRD data says "this domain is new", which is context and must
+    not correlate or reach an IDS. Threat feed data says "this domain was
+    observed hosting credential theft", which is a verdict: you want it exported
+    to your IDS ruleset (to_ids) and you want it to correlate, because a match
+    against one of your events is exactly the signal you are paying for.
+
+    Volume makes that affordable -- these feeds are orders of magnitude smaller
+    than 374k new domains a day.
+    """
+    ts = str(timestamp if timestamp is not None else _midnight(feed_date))
+    ev_uuid = threat_event_uuid(threat_type, feed_date, namespace)
+
+    attributes = []
+    for r in records:
+        # `domain` for an apex, `hostname` for a subdomain: MISP treats these as
+        # distinct types, and a large share of the phishing feed is subdomains
+        # on shared hosts (weebly.com and friends). Typing those as `domain`
+        # would be wrong and would mislead anything filtering by type.
+        attr_type = getattr(r, "misp_type", "domain")
+        attr: dict[str, Any] = {
+            "category": category,
+            "comment": r.as_comment(),
+            "disable_correlation": disable_correlation,
+            "timestamp": ts,
+            "to_ids": to_ids,
+            "type": attr_type,
+            "uuid": threat_attribute_uuid(threat_type, r.domain, namespace),
+            "value": r.domain,
+        }
+        # MISP understands first_seen/last_seen on attributes; the feed gives
+        # them to us, so pass them through rather than discarding evidence.
+        if getattr(r, "first_seen", ""):
+            attr["first_seen"] = r.first_seen
+        if getattr(r, "last_seen", ""):
+            attr["last_seen"] = r.last_seen
+        attributes.append(attr)
+
+    label = threat_type.capitalize()
+    return {
+        "Event": {
+            "analysis": str(analysis),
+            "date": feed_date.isoformat(),
+            "extends_uuid": "",
+            "info": (f"{info_prefix}: {label} domains - {feed_date.isoformat()} "
+                     f"({len(records)} domains)"),
+            "protected": False,
+            "publish_timestamp": ts,
+            "published": published,
+            "threat_level_id": str(threat_level_id),
+            "timestamp": ts,
+            "uuid": ev_uuid,
+            "Orgc": {"name": org_name, "uuid": org_uuid(org_name, namespace)},
+            "Tag": _tag_entries(list(tags or []) +
+                                [f'whoisfreaks:threat="{threat_type}"']),
+            "Attribute": attributes,
+        }
+    }
+
+
+def write_threat_day(
+        threat_type: str,
+        feed_date: date,
+        records: list[Any],
+        *,
+        output_dir: str | Path,
+        meta_dir: str | Path,
+        cfg_kwargs: dict[str, Any],
+        force: bool = False,
+        file_mode: int = DEFAULT_FILE_MODE,
+) -> tuple[bool, str]:
+    """Write one threat-feed event plus sidecars. Mirrors write_day()."""
+    output_dir, meta_dir = Path(output_dir), Path(meta_dir)
+    namespace = cfg_kwargs["namespace"]
+    ev_uuid = threat_event_uuid(threat_type, feed_date, namespace)
+    digest = content_digest(f"{r.domain}|{r.last_seen}" for r in records)
+
+    key = f"{threat_type}-{feed_date.isoformat()}"
+    meta_path = meta_dir / f"{key}.meta.json"
+    hashes_path = meta_dir / f"{key}.hashes"
+    event_file = output_dir / f"{ev_uuid}.json"
+
+    previous = None
+    if meta_path.is_file():
+        try:
+            previous = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous = None
+
+    unchanged = bool(previous) and previous.get("content_digest") == digest
+    if unchanged and not force and event_file.is_file():
+        _ensure_mode(event_file, file_mode)
+        _ensure_mode(hashes_path, file_mode)
+        _ensure_mode(meta_path, file_mode)
+        return False, ev_uuid
+
+    if unchanged and previous:
+        timestamp = int(previous["timestamp"])
+    elif previous is None:
+        timestamp = _midnight(feed_date)
+    else:
+        timestamp = int(datetime.now(timezone.utc).timestamp())
+
+    event = build_threat_event(threat_type, feed_date, records,
+                               timestamp=timestamp, **cfg_kwargs)
+    _atomic_write_json(event_file, event, file_mode)
+    _write_hashes(hashes_path, [r.domain for r in records], ev_uuid, file_mode)
+    _atomic_write_json(meta_path, {
+        "threat_type": threat_type,
+        "feed_date": feed_date.isoformat(),
+        "event_uuid": ev_uuid,
+        "content_digest": digest,
+        "domain_count": len(records),
+        "timestamp": timestamp,
+        "manifest": manifest_entry(event),
+    }, file_mode)
+
+    log.info("wrote %s %s: %d domains", threat_type, feed_date, len(records))
+    return True, ev_uuid
+
+
+def rebuild_threat_manifest(
+        output_dir: str | Path,
+        meta_dir: str | Path,
+        keys: list[str],
+        file_mode: int = DEFAULT_FILE_MODE,
+) -> tuple[int, int]:
+    """Assemble manifest.json and hashes.csv for the threat feed directory."""
+    output_dir, meta_dir = Path(output_dir), Path(meta_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, Any] = {}
+    sources: list[Path] = []
+    events = 0
+    for key in sorted(keys):
+        mp = meta_dir / f"{key}.meta.json"
+        if not mp.is_file():
+            continue
+        try:
+            meta = json.loads(mp.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        manifest.update(meta.get("manifest", {}))
+        sources.append(meta_dir / f"{key}.hashes")
+        events += 1
+    _atomic_write_json(output_dir / MANIFEST_NAME, manifest, file_mode)
+    lines = _concat_hashes(output_dir / HASHES_NAME, sources, file_mode)
+    log.info("threat manifest: %d events, hashes.csv: %d lines", events, lines)
+    return events, lines
 
 
 def manifest_entry(event: dict[str, Any]) -> dict[str, Any]:

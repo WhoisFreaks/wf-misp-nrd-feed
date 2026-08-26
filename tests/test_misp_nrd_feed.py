@@ -660,3 +660,241 @@ def test_hashes_concat_matches_per_day_files(tmp_path):
     assert (tmp_path / "feed" / "hashes.csv").read_bytes() == expected
     assert lines == 6
     assert events == 3
+
+
+# --------------------------------------------------------------------------- #
+# threat feeds
+# --------------------------------------------------------------------------- #
+
+from src import threat_fetcher as tfetch
+
+THREAT_CSV = (
+    "domain,threat_type,confidence,first_seen,last_seen,No_of_threat_matched_pivots\n"
+    "00057365.com,phishing,1,2026-06-12 10:15:25+00,2026-07-09 10:12:45.256919+00,3\n"
+    "low-conf.xyz,phishing,0.4,2026-06-01 00:00:00+00,2026-07-01 00:00:00+00,1\n"
+    "notadomain,phishing,1,,,0\n"
+)
+
+
+def test_threat_csv_parsing():
+    recs = tfetch.parse_csv(THREAT_CSV, "phishing")
+    assert [r.domain for r in recs] == ["00057365.com", "low-conf.xyz"]
+    assert recs[0].confidence == 1.0
+    assert recs[0].pivots == 3
+    assert recs[0].first_seen.startswith("2026-06-12")
+
+
+def test_threat_csv_tolerates_no_header_and_junk():
+    assert tfetch.parse_csv("", "phishing") == []
+    assert tfetch.parse_csv("\ufeff" + THREAT_CSV, "phishing")[0].domain == "00057365.com"
+    headerless = "a.com,malware,1,,,2\n"
+    recs = tfetch.parse_csv(headerless, "malware")
+    assert recs[0].domain == "a.com" and recs[0].threat_type == "malware"
+
+
+def test_threat_comment_is_human_readable():
+    r = tfetch.parse_csv(THREAT_CSV, "phishing")[0]
+    c = r.as_comment()
+    assert "phishing" in c and "confidence 1" in c and "3 infrastructure pivots" in c
+
+
+def test_unknown_threat_type_rejected():
+    with pytest.raises(tfetch.ThreatFetchError, match="unknown threat type"):
+        tfetch.fetch_raw("ransomware", "k", "https://example.invalid")
+
+
+def test_threat_flags_are_inverted_versus_nrd():
+    """
+    The whole point of the threat feed: it is a verdict, not context, so it must
+    export to IDS rulesets and must correlate — the opposite of NRD attributes.
+    """
+    recs = tfetch.parse_csv(THREAT_CSV, "phishing")
+    ev = builder.build_threat_event(
+        "phishing", DAY, recs, namespace=NS, org_name="WhoisFreaks",
+    )["Event"]
+    for a in ev["Attribute"]:
+        assert a["to_ids"] is True
+        assert a["disable_correlation"] is False
+
+    nrd = builder.build_event(DAY, DOMAINS, **CFG_KWARGS)["Event"]
+    for a in nrd["Attribute"]:
+        assert a["to_ids"] is False
+        assert a["disable_correlation"] is True
+
+
+def test_threat_attribute_uuid_is_not_date_scoped(tmp_path):
+    """
+    A flagged domain is one indicator regardless of which delta carried it, so
+    the same domain must get the same attribute UUID on a later day — otherwise
+    every delta would create a duplicate attribute.
+    """
+    a = builder.threat_attribute_uuid("phishing", "x.com", NS)
+    b = builder.threat_attribute_uuid("phishing", "x.com", NS)
+    assert a == b
+    assert a != builder.threat_attribute_uuid("malware", "x.com", NS)
+    assert a != builder.threat_attribute_uuid("phishing", "y.com", NS)
+
+
+def test_threat_event_uuid_is_type_and_date_scoped():
+    a = builder.threat_event_uuid("phishing", DAY, NS)
+    assert a == builder.threat_event_uuid("phishing", DAY, NS)
+    assert a != builder.threat_event_uuid("malware", DAY, NS)
+    assert a != builder.threat_event_uuid("phishing", DAY + timedelta(1), NS)
+
+
+def test_threat_first_last_seen_passed_through():
+    recs = tfetch.parse_csv(THREAT_CSV, "phishing")
+    ev = builder.build_threat_event("phishing", DAY, recs, namespace=NS,
+                                    org_name="WhoisFreaks")["Event"]
+    assert ev["Attribute"][0]["first_seen"].startswith("2026-06-12")
+    assert ev["Attribute"][0]["last_seen"].startswith("2026-07-09")
+
+
+def test_threat_write_and_manifest(tmp_path):
+    recs = tfetch.parse_csv(THREAT_CSV, "phishing")
+    kw = {"namespace": NS, "org_name": "WhoisFreaks"}
+    changed, ev_uuid = builder.write_threat_day(
+        "phishing", DAY, recs,
+        output_dir=tmp_path / "tfeed", meta_dir=tmp_path / "meta", cfg_kwargs=kw)
+    assert changed is True
+    assert (tmp_path / "tfeed" / f"{ev_uuid}.json").is_file()
+
+    # unchanged re-run must not rewrite
+    assert builder.write_threat_day(
+        "phishing", DAY, recs,
+        output_dir=tmp_path / "tfeed", meta_dir=tmp_path / "meta",
+        cfg_kwargs=kw)[0] is False
+
+    events, lines = builder.rebuild_threat_manifest(
+        tmp_path / "tfeed", tmp_path / "meta", [f"phishing-{DAY.isoformat()}"])
+    assert events == 1
+    assert lines == len(recs)
+    man = json.loads((tmp_path / "tfeed" / "manifest.json").read_text())
+    assert ev_uuid in man
+
+
+def test_threat_cache_baseline_and_deltas(tmp_path):
+    assert cache.threat_has_baseline(tmp_path, "phishing") is False
+    cache.threat_save(tmp_path, "phishing", None, THREAT_CSV)
+    assert cache.threat_has_baseline(tmp_path, "phishing") is True
+    assert cache.threat_load(tmp_path, "phishing", None) == THREAT_CSV
+
+    cache.threat_save(tmp_path, "phishing", DAY, THREAT_CSV)
+    cache.threat_save(tmp_path, "phishing", DAY - timedelta(days=1), THREAT_CSV)
+    cache.threat_save(tmp_path, "malware", DAY, THREAT_CSV)
+    deltas = cache.threat_cached_deltas(tmp_path, "phishing")
+    assert deltas == [DAY - timedelta(days=1), DAY]
+    assert cache.threat_cached_deltas(tmp_path, "malware") == [DAY]
+
+
+def test_threat_dir_must_differ_from_nrd_dir():
+    cfg = config_mod.Config(api_key="k", threat_enabled=True,
+                            output_dir="/tmp/x/feed")
+    cfg.threat_output_dir = "/tmp/x/feed"
+    cfg.threat_dir_explicit = True
+    with pytest.raises(config_mod.ConfigError, match="must differ"):
+        cfg.validate()
+
+
+def test_threat_dir_follows_output_dir_override():
+    cfg = config_mod.Config(api_key="k", output_dir="/srv/nrd/feed")
+    cfg.derive_threat_dir()
+    assert cfg.threat_output_dir == "/srv/nrd/threat-feed"
+
+
+def test_threat_dir_explicit_survives_derivation():
+    cfg = config_mod.Config(api_key="k", output_dir="/srv/nrd/feed")
+    cfg.threat_output_dir = "/elsewhere/threat"
+    cfg.threat_dir_explicit = True
+    cfg.derive_threat_dir()
+    assert cfg.threat_output_dir == "/elsewhere/threat"
+
+
+def test_threat_validate_rejects_bad_type_and_confidence():
+    cfg = config_mod.Config(api_key="k", threat_enabled=True,
+                            threat_types=["phishing", "ransomware"])
+    with pytest.raises(config_mod.ConfigError, match="Unknown threat feed"):
+        cfg.validate()
+    cfg2 = config_mod.Config(api_key="k", threat_enabled=True,
+                             threat_min_confidence=1.5)
+    with pytest.raises(config_mod.ConfigError, match="min_confidence"):
+        cfg2.validate()
+
+
+def test_threat_disabled_by_default():
+    assert config_mod.Config().threat_enabled is False
+
+
+def test_threat_decode_handles_gzip_zip_and_plain():
+    """
+    The container format is sniffed, not trusted from headers, because the
+    endpoint may serve plain CSV, gzip or zip depending on tier and transport.
+    """
+    import gzip as gz
+    import io as _io
+    import zipfile
+
+    plain = THREAT_CSV.encode()
+    assert tfetch.decode_body(plain).startswith("domain,")
+    assert tfetch.decode_body(gz.compress(plain)).startswith("domain,")
+
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("phishing.csv", THREAT_CSV)
+    assert tfetch.decode_body(buf.getvalue()).startswith("domain,")
+
+
+def test_threat_decode_rejects_binary_loudly():
+    """
+    Binary that is neither gzip nor zip must fail, not decode to mojibake that
+    the CSV reader mines for fake rows.
+    """
+    junk = bytes(range(256)) * 40
+    with pytest.raises(tfetch.ThreatFetchError, match="not text CSV"):
+        tfetch.decode_body(junk)
+
+
+def test_threat_timestamps_normalised_to_iso8601():
+    """
+    The feed emits `2026-07-21 00:16:14.99156+00`: space separator, bare +00
+    offset, five fractional digits. MISP wants ISO-8601, and Python 3.9's
+    fromisoformat rejects both the offset and the odd fraction length.
+    """
+    n = tfetch.normalise_timestamp
+    assert n("2026-07-21 00:16:14.99156+00") == "2026-07-21T00:16:14.991560+00:00"
+    assert n("2025-12-23 03:24:12+00") == "2025-12-23T03:24:12+00:00"
+    assert n("2026-08-25 00:16:20.97521+00") == "2026-08-25T00:16:20.975210+00:00"
+    assert n("") == ""
+    # must be parseable on every supported Python, including the 3.9 floor
+    from datetime import datetime
+    datetime.fromisoformat(n("2026-07-21 00:16:14.99156+00"))
+    # unparseable input survives rather than being discarded
+    assert n("not a timestamp") == "not a timestamp"
+
+
+@pytest.mark.parametrize("domain,apex", [
+    ("0108.dk", True),
+    ("hikvision-cctv.su", True),
+    ("012.net.il", True),            # two dots but still an apex
+    ("foo.co.uk", True),
+    ("00000.hikvision-cctv.su", False),
+    ("x.weebly.com", False),         # two dots and NOT an apex
+    ("a.b.co.uk", False),
+])
+def test_apex_detection(domain, apex):
+    assert tfetch.is_apex(domain) is apex
+
+
+def test_threat_attribute_type_splits_domain_and_hostname():
+    """MISP distinguishes apex domains from hostnames; so must we."""
+    csv_body = (
+        "domain,threat_type,confidence,first_seen,last_seen,No_of_threat_matched_pivots\n"
+        "apex-example.com,phishing,1.0,2026-01-01 00:00:00+00,2026-01-02 00:00:00+00,0\n"
+        "sub.apex-example.com,phishing,1.0,2026-01-01 00:00:00+00,2026-01-02 00:00:00+00,0\n"
+    )
+    recs = tfetch.parse_csv(csv_body, "phishing")
+    ev = builder.build_threat_event("phishing", DAY, recs, namespace=NS,
+                                    org_name="WhoisFreaks")["Event"]
+    types = {a["value"]: a["type"] for a in ev["Attribute"]}
+    assert types["apex-example.com"] == "domain"
+    assert types["sub.apex-example.com"] == "hostname"

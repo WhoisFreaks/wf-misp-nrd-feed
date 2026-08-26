@@ -198,3 +198,79 @@ def merge_day(
     for tld_set in tld_sets:
         seen.update(load(cache_dir, feed_date, tld_set))
     return sorted(seen)
+
+
+# --------------------------------------------------------------------------- #
+# threat feed cache
+#
+# Stored separately from the NRD cache because the delivery model differs: the
+# first fetch is a full dump and every fetch after it is a delta, so "the
+# current state" is the baseline plus every delta since, rather than a window of
+# independent days.
+# --------------------------------------------------------------------------- #
+
+_THREAT_RE = re.compile(r"^threat-([a-z]+)-(full|\d{4}-\d{2}-\d{2})\.csv\.gz$")
+
+
+def threat_cache_path(
+        cache_dir: str | Path, threat_type: str, feed_date: date | None
+) -> Path:
+    stamp = "full" if feed_date is None else feed_date.isoformat()
+    return Path(cache_dir) / f"threat-{threat_type}-{stamp}.csv.gz"
+
+
+def threat_save(
+        cache_dir: str | Path, threat_type: str, feed_date: date | None, body: str
+) -> Path:
+    """Store a raw threat CSV, gzipped, atomically."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = threat_cache_path(cache_dir, threat_type, feed_date)
+    fd, tmp = tempfile.mkstemp(dir=str(cache_dir), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as raw, gzip.GzipFile(
+                fileobj=raw, mode="wb", mtime=0
+        ) as gz:
+            gz.write(body.encode("utf-8"))
+        os.chmod(tmp, 0o666 & ~_current_umask())
+        os.replace(tmp, target)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return target
+
+
+def threat_load(
+        cache_dir: str | Path, threat_type: str, feed_date: date | None
+) -> str:
+    path = threat_cache_path(cache_dir, threat_type, feed_date)
+    if not path.is_file():
+        return ""
+    try:
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except (OSError, EOFError, gzip.BadGzipFile) as exc:
+        log.warning("threat cache %s unreadable (%s)", path.name, exc)
+        return ""
+
+
+def threat_has_baseline(cache_dir: str | Path, threat_type: str) -> bool:
+    return threat_cache_path(cache_dir, threat_type, None).is_file()
+
+
+def threat_cached_deltas(cache_dir: str | Path, threat_type: str) -> list[date]:
+    """Delta dates on disk for one threat type, oldest first."""
+    cache_dir = Path(cache_dir)
+    if not cache_dir.is_dir():
+        return []
+    out: list[date] = []
+    for entry in cache_dir.iterdir():
+        m = _THREAT_RE.match(entry.name)
+        if not m or m.group(1) != threat_type or m.group(2) == "full":
+            continue
+        try:
+            out.append(date.fromisoformat(m.group(2)))
+        except ValueError:
+            continue
+    return sorted(out)
